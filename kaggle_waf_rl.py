@@ -257,9 +257,10 @@ class BertEncoder:
         if self._model is None:
             import torch  # noqa
             from transformers import AutoModel, AutoTokenizer
-            self._tok = AutoTokenizer.from_pretrained("bert-base-uncased")
-            self._model = AutoModel.from_pretrained("bert-base-uncased").eval()
             self._torch = torch
+            self._dev = "cuda" if torch.cuda.is_available() else "cpu"
+            self._tok = AutoTokenizer.from_pretrained("bert-base-uncased")
+            self._model = AutoModel.from_pretrained("bert-base-uncased").eval().to(self._dev)
 
     def encode(self, tele, action, waf):
         if not self.enabled:
@@ -270,10 +271,10 @@ class BertEncoder:
                 f"ra={action['random_agent']} found={tele.get('found')} "
                 f"dbms={tele.get('dbms')} block_ratio={tele.get('block_ratio')} "
                 f"reqs={tele.get('requests')} techniques={tele.get('techniques')}")
-        t = self._tok(text, return_tensors="pt", truncation=True, max_length=128)
+        t = self._tok(text, return_tensors="pt", truncation=True, max_length=128).to(self._dev)
         with self._torch.no_grad():
             out = self._model(**t)
-        return out.last_hidden_state[:, 0, :].squeeze(0).tolist()  # CLS, 768
+        return out.last_hidden_state[:, 0, :].squeeze(0).cpu().tolist()  # CLS, 768 (GPU if avail)
 
 # ----------------------------------------------------------------------------
 # GYM ENV  (imports gym lazily)

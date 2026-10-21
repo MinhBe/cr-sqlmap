@@ -73,6 +73,10 @@ def build_cmd(target, param, cookie, tamper, technique, level, risk,
     cmd = [SQLMAP, "-u", target, "--batch", "--disable-coloring", "-v", "1",
            "--output-dir", outdir, "-t", traffic_file,
            "--timeout", str(req_timeout), "--retries", str(retries)]
+    # sqlmap in-run request parallelism (uses Kali's CPUs to speed each episode)
+    _threads = os.environ.get("SQLMAP_THREADS")
+    if _threads:
+        cmd += ["--threads", _threads]
     if param:
         cmd += ["-p", param]
     if cookie:
