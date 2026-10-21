@@ -63,6 +63,8 @@ CKPT_DIR = os.environ.get("CKPT_DIR", "/kaggle/working/ckpt")
 # compute budget (and the anti-runaway breaker) are unaffected.
 GOLD_EVAL_EVERY = int(os.environ.get("GOLD_EVAL_EVERY", "2000"))
 GOLD_EVAL_K = int(os.environ.get("GOLD_EVAL_K", "10"))
+LEARNING_STARTS = int(os.environ.get("LEARNING_STARTS", "200"))  # lower for quick sanity
+DEBUG_EPISODES = os.environ.get("DEBUG_EPISODES", "1") == "1"    # live per-episode logging
 
 # ----------------------------------------------------------------------------
 # ACTION SPACE — 9 x 3 x 2 x 7 x 2 = 756 discrete actions
@@ -128,16 +130,34 @@ def call_kali(action, waf=WAF, timeout=EPISODE_TIMEOUT, retries=2):
         req = urllib.request.Request(RELAY_URL + "/run", data=data,
                                      headers=headers, method="POST")
         try:
-            with urllib.request.urlopen(req, timeout=timeout + 30) as r:
+            with urllib.request.urlopen(req, timeout=timeout + 15) as r:
                 return json.loads(r.read().decode())
-        except (urllib.error.URLError, TimeoutError) as e:  # noqa
+        except Exception as e:  # noqa: BLE001 - any failure -> visible, then retry
             last = e
+            print(f"[relay] call failed (attempt {attempt+1}/{retries+1}): {e}", flush=True)
             time.sleep(2 * (attempt + 1))
+    print(f"[relay] UNREACHABLE after {retries+1} tries -> {RELAY_URL} ({last}); "
+          f"returning empty episode (found=False)", flush=True)
     return {"found": False, "requests": 0, "blocked_responses": 0,
             "block_ratio": 0.0, "duration_s": 0.0, "timed_out": True,
             "error": f"relay unreachable: {last}", "techniques": [],
             "dbms": None, "payloads": [], "waf_warned": False,
             "not_injectable": True}
+
+
+def preflight():
+    """Fail fast with a clear message if the relay/tunnel is unreachable, instead
+    of silently crawling through per-step timeouts."""
+    url = RELAY_URL.rstrip("/") + "/health"
+    try:
+        req = urllib.request.Request(url, headers={"ngrok-skip-browser-warning": "true"})
+        with urllib.request.urlopen(req, timeout=12) as r:
+            print(f"[preflight] relay OK at {RELAY_URL}: {r.read().decode()}", flush=True)
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(
+            f"[preflight] CANNOT reach relay at {RELAY_URL!r} ({e}). On Kali run "
+            f"./start_lab.sh to get the CURRENT ngrok URL, set the Kaggle Secret "
+            f"RELAY_URL to exactly that, confirm Internet=ON, then rerun.") from e
 
 # ----------------------------------------------------------------------------
 # SOFT CHECKLIST — EMA over 9 "blocked keyword" buckets (Paper-1 soft version)
@@ -326,6 +346,12 @@ def make_env(waf=WAF, ep_len=EP_LEN, total_timesteps=TOTAL_TIMESTEPS):
             self._step += 1
             terminated = bool(tele.get("found"))   # episode ends on a successful evasion
             truncated = self._step >= self.ep_len
+            if DEBUG_EPISODES:
+                print(f"[ep step={self._step}] {self.waf} {action['technique']}"
+                      f"/L{action['level']}/R{action['risk']}/ra={action['random_agent']} "
+                      f"found={tele.get('found')} block={tele.get('block_ratio')} "
+                      f"req={tele.get('requests')} r={reward:.2f}"
+                      + (f" ERR={tele['error']}" if tele.get('error') else ""), flush=True)
             info = {"telemetry": tele, "reward_parts": parts, "action": action}
             return self._obs(tele, action), float(reward), terminated, truncated, info
 
@@ -404,6 +430,7 @@ def train():
                   f"TPR_gold={tpr:.3f} gamma={self.cb.gamma():.3f}")
             return True
 
+    preflight()   # fail fast + clearly if the relay/tunnel is unreachable
     os.makedirs(CKPT_DIR, exist_ok=True)
     env = make_env()
     Algo = {"DQN": DQN, "PPO": PPO}[ALGO]
@@ -416,7 +443,7 @@ def train():
         kw = dict(policy="MlpPolicy", env=env, gamma=GAMMA, verbose=1,
                   tensorboard_log=os.path.join(CKPT_DIR, "tb"))
         if ALGO == "DQN":
-            kw.update(buffer_size=20000, learning_starts=200, train_freq=4,
+            kw.update(buffer_size=20000, learning_starts=LEARNING_STARTS, train_freq=4,
                       target_update_interval=500, exploration_fraction=0.3)
         model = Algo(**kw)
 
@@ -428,7 +455,7 @@ def train():
         GoldEvalCallback(make_env(waf=WAF), cb, GOLD_EVAL_EVERY, GOLD_EVAL_K),
     ]
     model.learn(total_timesteps=TOTAL_TIMESTEPS, callback=callbacks,
-                reset_num_timesteps=not bool(resume))
+                log_interval=1, reset_num_timesteps=not bool(resume))
     model.save(os.path.join(CKPT_DIR, f"{ALGO.lower()}_{WAF}_final"))
     print("[done] saved final model")
 
