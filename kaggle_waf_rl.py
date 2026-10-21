@@ -65,6 +65,10 @@ GOLD_EVAL_EVERY = int(os.environ.get("GOLD_EVAL_EVERY", "2000"))
 GOLD_EVAL_K = int(os.environ.get("GOLD_EVAL_K", "10"))
 LEARNING_STARTS = int(os.environ.get("LEARNING_STARTS", "200"))  # lower for quick sanity
 DEBUG_EPISODES = os.environ.get("DEBUG_EPISODES", "1") == "1"    # live per-episode logging
+# Parallel environments: N concurrent episodes (SubprocVecEnv) for ~N x throughput.
+# Needs the relay's RELAY_MAX_CONCURRENT >= N and Kali RAM/CPU headroom. Default 2;
+# set N_ENVS=1 to fall back to the proven single-env path if the parallel path errors.
+N_ENVS = int(os.environ.get("N_ENVS", "2"))
 
 # ----------------------------------------------------------------------------
 # ACTION SPACE — 9 x 3 x 2 x 7 x 2 = 756 discrete actions
@@ -322,6 +326,12 @@ def make_env(waf=WAF, ep_len=EP_LEN, total_timesteps=TOTAL_TIMESTEPS):
             self.fa2rnn = None   # set to a trained fa2rnn.FA2RNNReward to turn on R_REG
             self._step = 0
 
+        def set_beta(self, b0, b1):
+            # called via VecEnv.env_method so the circuit breaker can lower the
+            # surrogate weight across all parallel sub-envs (separate processes)
+            self.reward_fn.b0 = b0
+            self.reward_fn.b1 = b1
+
         def _obs(self, tele, action):
             ema = self.checklist.update(tele)
             eng = engineered_state(tele, action, self.waf, ema)
@@ -361,33 +371,51 @@ def make_env(waf=WAF, ep_len=EP_LEN, total_timesteps=TOTAL_TIMESTEPS):
 # TRAIN  (DQN/PPO via stable-baselines3, with checkpoint/resume)
 # ----------------------------------------------------------------------------
 def train():
+    import functools
     import glob
     from stable_baselines3 import DQN, PPO
     from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
+    from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 
     from circuit_breakers import CircuitBreaker
 
     cb = CircuitBreaker()   # shared by both callbacks (gold-eval feeds its gamma)
 
+    class _BetaState:        # holds the breaker's current surrogate-weight target
+        def __init__(self, b0, b1):
+            self.b0, self.b1 = b0, b1
+
+    beta_state = _BetaState(BETA_START, BETA_END)
+
     class CircuitBreakerCallback(BaseCallback):
-        """Dual breakers: lowers surrogate beta when gamma (reward-hacking) trips,
+        """Dual breakers over N parallel envs: lowers surrogate beta when gamma
+        (reward-hacking) trips and propagates it to every sub-env via env_method;
         halts the run on compute-runaway."""
-        def __init__(self, env, breaker, verbose=0):
+        def __init__(self, breaker, bstate, verbose=0):
             super().__init__(verbose)
-            self.env = env
             self.cb = breaker
+            self.bs = bstate
+            self._last = (bstate.b0, bstate.b1)
 
         def _on_step(self):
             infos = self.locals.get("infos") or []
             rewards = self.locals.get("rewards")
-            if infos and rewards is not None:
-                tele = infos[0].get("telemetry", {})
-                acts = self.cb.update(float(rewards[0]), tele, self.env.reward_fn)
-                if acts.get("reduced_surrogate_beta") or acts.get("halt"):
-                    print(f"[circuit-breaker] {acts}")
-                if self.cb.tripped_runaway:
-                    print("[circuit-breaker] compute runaway -> stopping training")
-                    return False
+            if rewards is not None:
+                for i, info in enumerate(infos):
+                    tele = info.get("telemetry", {})
+                    self.cb.update(float(rewards[i]), tele, self.bs)
+                    if self.cb.tripped_runaway:
+                        print("[circuit-breaker] compute runaway -> stopping", flush=True)
+                        return False
+                cur = (round(self.bs.b0, 4), round(self.bs.b1, 4))
+                if cur != self._last:
+                    self._last = cur
+                    try:
+                        self.training_env.env_method("set_beta", cur[0], cur[1])
+                    except Exception as e:  # noqa
+                        print(f"[circuit-breaker] beta propagate failed: {e}", flush=True)
+                    print(f"[circuit-breaker] reward-hacking (gamma={self.cb.gamma():.3f}) "
+                          f"-> surrogate beta lowered to b0={cur[0]} b1={cur[1]}", flush=True)
             return True
 
     class GoldEvalCallback(BaseCallback):
@@ -432,15 +460,21 @@ def train():
 
     preflight()   # fail fast + clearly if the relay/tunnel is unreachable
     os.makedirs(CKPT_DIR, exist_ok=True)
-    env = make_env()
+
+    # N parallel episodes. N_ENVS=1 -> proven single-env path (DummyVecEnv);
+    # N_ENVS>1 -> SubprocVecEnv (each a separate process, its own relay call).
+    env_fns = [functools.partial(make_env, waf=WAF) for _ in range(max(1, N_ENVS))]
+    venv = SubprocVecEnv(env_fns) if N_ENVS > 1 else DummyVecEnv(env_fns)
+    print(f"[train] N_ENVS={N_ENVS} ({'SubprocVecEnv' if N_ENVS > 1 else 'DummyVecEnv'}); "
+          f"ensure relay RELAY_MAX_CONCURRENT >= {N_ENVS}", flush=True)
     Algo = {"DQN": DQN, "PPO": PPO}[ALGO]
 
     resume = sorted(glob.glob(os.path.join(CKPT_DIR, "*.zip")))
     if resume:
         print(f"[resume] loading {resume[-1]}")
-        model = Algo.load(resume[-1], env=env)
+        model = Algo.load(resume[-1], env=venv)
     else:
-        kw = dict(policy="MlpPolicy", env=env, gamma=GAMMA, verbose=1,
+        kw = dict(policy="MlpPolicy", env=venv, gamma=GAMMA, verbose=1,
                   tensorboard_log=os.path.join(CKPT_DIR, "tb"))
         if ALGO == "DQN":
             kw.update(buffer_size=20000, learning_starts=LEARNING_STARTS, train_freq=4,
@@ -451,7 +485,7 @@ def train():
                               name_prefix=f"{ALGO.lower()}_{WAF}")
     callbacks = [
         ckpt,
-        CircuitBreakerCallback(env, cb),
+        CircuitBreakerCallback(cb, beta_state),
         GoldEvalCallback(make_env(waf=WAF), cb, GOLD_EVAL_EVERY, GOLD_EVAL_K),
     ]
     model.learn(total_timesteps=TOTAL_TIMESTEPS, callback=callbacks,

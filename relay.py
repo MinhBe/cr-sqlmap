@@ -40,7 +40,12 @@ TARGETS = {
 }
 
 app = Flask(__name__)
-_episode_lock = threading.Lock()
+# Bounded concurrency: allow up to RELAY_MAX_CONCURRENT episodes at once (default 1
+# = serial, current behaviour). Raise it (e.g. 4) for parallel-env training once the
+# Kali VM has RAM/CPU headroom. The APCT timing probe is serialized inside executor
+# so the timing side-channel stays clean even under concurrent scans.
+_MAX_CONCURRENT = int(os.environ.get("RELAY_MAX_CONCURRENT", "1"))
+_sem = threading.BoundedSemaphore(_MAX_CONCURRENT)
 
 
 @app.get("/health")
@@ -80,14 +85,14 @@ def run():
         security=body.get("security", "low"),
     )
 
-    if not _episode_lock.acquire(blocking=False):
-        return jsonify(error="busy: an episode is already running"), 429
+    if not _sem.acquire(blocking=False):
+        return jsonify(error=f"busy: {_MAX_CONCURRENT} concurrent episode(s) in flight"), 429
     try:
         result = executor.run_episode(**action)
     except Exception as exc:  # noqa: BLE001 - report any failure as JSON
         return jsonify(error=f"executor failed: {exc}", waf=waf), 500
     finally:
-        _episode_lock.release()
+        _sem.release()
 
     result["waf"] = waf
     return jsonify(result)

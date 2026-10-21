@@ -134,6 +134,11 @@ def parse_traffic(path):
 # then times both payloads through the WAF. APCT = exec_time / payload_char_len.
 _TAMPER_CACHE = {}
 _KB_INIT = [False]
+# Serialize ONLY the APCT timing probe across concurrent episodes so the timing
+# side-channel (R_RUL) is measured without contention, even while the heavy sqlmap
+# scans run in parallel.
+import threading as _threading
+_PROBE_LOCK = _threading.Lock()
 
 
 def _init_sqlmap_kb():
@@ -212,8 +217,9 @@ def probe_pair(target, param, cookie, tamper, base_payload="1' OR '1'='1' -- -",
         samples = [_timed_get(u, cookie, timeout) for _ in range(nprobe)]
         return statistics.median(t for t, _ in samples), samples[-1][1]
 
-    t_o, s_o = timed_median(url_with(base_payload))
-    t_m, s_m = timed_median(url_with(mut))
+    with _PROBE_LOCK:   # clean timing even under concurrent episodes
+        t_o, s_o = timed_median(url_with(base_payload))
+        t_m, s_m = timed_median(url_with(mut))
     l_o, l_m = max(1, len(base_payload)), max(1, len(mut))
     return {
         "orig": base_payload, "mut": mut,
