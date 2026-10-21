@@ -1,0 +1,15 @@
+{
+  "id": "REPLACE_WITH_USERNAME/cr-sqlmap-rl",
+  "title": "cr-sqlmap-rl",
+  "code_file": "kaggle_waf_rl.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": true,
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "keywords": ["gpu"],
+  "_comment": "Set id's username per account (withthecodebeone / minhart). The kernel dir must also contain circuit_breakers.py, fa2rnn.py, eval.py. Add RELAY_URL + RELAY_API_KEY as Kaggle Secrets on the kernel (Add-ons > Secrets). enable_internet=true is required so the kernel can reach the ngrok relay."
+}

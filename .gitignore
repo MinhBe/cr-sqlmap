@@ -1,0 +1,32 @@
+# ---- SECRETS: never commit ----
+*.env
+relay.env
+.env
+kaggle.json
+*.pem
+*.key
+id_rsa*
+*_ed25519*
+*.ppk
+ngrok.yml
+.config/
+.kaggle/
+.kaggle_accounts/
+
+# ---- runtime / state / outputs ----
+__pycache__/
+*.pyc
+*.pyo
+ckpt/
+out/
+kernel/
+*.log
+eval_log.json
+.cr_sqlmap_runner_state.json
+sqlmap_ep_*/
+transcripts/
+
+# ---- os/editor ----
+.DS_Store
+.vscode/
+.idea/

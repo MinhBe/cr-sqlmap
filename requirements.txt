@@ -1,0 +1,9 @@
+# Kaggle training environment (torch is preinstalled on Kaggle GPU images).
+stable-baselines3>=2.3.0
+gymnasium>=0.29.0
+transformers>=4.40.0
+tensorly>=0.8.1
+numpy>=1.24
+
+# Kali relay side only (not needed on Kaggle): Flask for relay.py
+# flask>=3.0

@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""
+relay.py - Flask relay for the CR-sqlmap RL lab (isolated lab use only).
+
+Exposes executor.run_episode() over HTTP so the Kaggle training notebook can
+POST an action and get back the sqlmap telemetry as JSON. Meant to sit behind an
+ngrok HTTPS tunnel (ngrok -> 127.0.0.1:RELAY_PORT).
+
+Safety / abuse controls (the ngrok URL is public):
+  * Targets are an ALLOWLIST of the two local lab WAF endpoints only. The caller
+    picks `waf` ("modsec" | "luawaf"); it can never supply an arbitrary URL, so
+    the endpoint cannot be used to attack anything but the lab.
+  * Every /run needs the shared secret in the `X-API-Key` header.
+  * Episodes are serialized (one sqlmap run at a time) to avoid overload.
+
+Env:
+  RELAY_API_KEY  shared secret (required to protect /run)
+  RELAY_PORT     listen port on 127.0.0.1 (default 5000)
+"""
+
+import os
+import threading
+
+from flask import Flask, jsonify, request
+
+import executor
+
+API_KEY = os.environ.get("RELAY_API_KEY", "")
+
+TARGET = "192.168.244.128"
+TARGETS = {
+    "modsec": {  # ModSecurity + OWASP-CRS v3.2.0 (REQUEST-942 only)
+        "base": f"http://{TARGET}:8080",
+        "url":  f"http://{TARGET}:8080/vulnerabilities/sqli/?id=1&Submit=Submit",
+    },
+    "luawaf": {  # ngx_lua_waf
+        "base": f"http://{TARGET}:8081",
+        "url":  f"http://{TARGET}:8081/vulnerabilities/sqli/?id=1&Submit=Submit",
+    },
+}
+
+app = Flask(__name__)
+_episode_lock = threading.Lock()
+
+
+@app.get("/health")
+def health():
+    return jsonify(status="ok", targets=list(TARGETS), auth_required=bool(API_KEY))
+
+
+@app.post("/run")
+def run():
+    if API_KEY and request.headers.get("X-API-Key") != API_KEY:
+        return jsonify(error="unauthorized"), 401
+
+    body = request.get_json(force=True, silent=True) or {}
+    waf = body.get("waf", "modsec")
+    if waf not in TARGETS:
+        return jsonify(error=f"unknown waf '{waf}'", choices=list(TARGETS)), 400
+    tgt = TARGETS[waf]
+
+    tamper = body.get("tamper", [])
+    if isinstance(tamper, str):
+        tamper = [t for t in tamper.split(",") if t]
+    extra = body.get("extra", [])
+    if isinstance(extra, str):
+        extra = extra.split()
+
+    action = dict(
+        target=tgt["url"],
+        login_base=tgt["base"],
+        param=body.get("param", "id"),
+        tamper=tamper,
+        technique=body.get("technique"),
+        level=int(body.get("level", 1)),
+        risk=int(body.get("risk", 1)),
+        random_agent=bool(body.get("random_agent", False)),
+        extra=extra,
+        overall_timeout=int(body.get("timeout", 180)),
+        security=body.get("security", "low"),
+    )
+
+    if not _episode_lock.acquire(blocking=False):
+        return jsonify(error="busy: an episode is already running"), 429
+    try:
+        result = executor.run_episode(**action)
+    except Exception as exc:  # noqa: BLE001 - report any failure as JSON
+        return jsonify(error=f"executor failed: {exc}", waf=waf), 500
+    finally:
+        _episode_lock.release()
+
+    result["waf"] = waf
+    return jsonify(result)
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("RELAY_PORT", "5000"))
+    # 127.0.0.1 only: the public ingress is ngrok, never the LAN directly.
+    app.run(host="127.0.0.1", port=port, threaded=True)
