@@ -8,17 +8,24 @@ LAB="$HOME_DIR/cr-sqlmap"
 NGROK="$HOME_DIR/bin/ngrok"
 cd "$LAB" || { echo "no $LAB"; exit 1; }
 
+# load config (RELAY_* + optional NGROK_DOMAIN for a stable URL)
+set -a; . ./relay.env 2>/dev/null; set +a
+
 # 1) relay on 127.0.0.1:5000
 if ! pgrep -f "python3 relay.py" >/dev/null 2>&1; then
-    set -a; . ./relay.env 2>/dev/null; set +a
     nohup python3 relay.py > relay.log 2>&1 &
     sleep 2
     echo "$(date -Is) started relay"
 fi
 
-# 2) ngrok tunnel -> 5000
+# 2) ngrok tunnel -> 5000. With a reserved domain (NGROK_DOMAIN in relay.env) the
+# public URL is STABLE across restarts; otherwise the free tier rotates it.
 if ! pgrep -f "ngrok http" >/dev/null 2>&1; then
-    nohup "$NGROK" http 5000 > ngrok.log 2>&1 &
+    if [ -n "${NGROK_DOMAIN:-}" ]; then
+        nohup "$NGROK" http --url="$NGROK_DOMAIN" 5000 > ngrok.log 2>&1 &
+    else
+        nohup "$NGROK" http 5000 > ngrok.log 2>&1 &
+    fi
     sleep 6
     echo "$(date -Is) started ngrok"
 fi
