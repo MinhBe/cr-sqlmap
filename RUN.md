@@ -25,24 +25,29 @@ ngrok domain makes it permanent — optional.)
 
 ---
 
-## Manual path (recommended first)
+## Kaggle path — git clone (full circle)
 
-1. On Kaggle (logged into either account), **New Notebook** → upload / paste
-   `kaggle_waf_rl.py`. Also add `circuit_breakers.py`, and `fa2rnn.py` +
-   `eval.py` if you want R_REG / eval in the same session (File → Add utility
-   script, or paste as cells).
-2. First cell:
+1. New Notebook → **Add-ons → Secrets**: add `RELAY_URL` and `RELAY_API_KEY`
+   (from step 0). For a **private** repo also add `GH_PAT` (a GitHub personal
+   access token with `repo` scope).
+2. **Settings**: Accelerator = GPU, Internet = ON.
+3. First cell:
    ```python
-   !pip install stable-baselines3 gymnasium transformers tensorly
+   # public repo:
+   !git clone https://github.com/MinhBe/cr-sqlmap.git
+   # private repo instead:
+   # from kaggle_secrets import UserSecretsClient
+   # pat = UserSecretsClient().get_secret("GH_PAT")
+   # !git clone https://{pat}@github.com/MinhBe/cr-sqlmap.git
+   %cd cr-sqlmap
+   !pip -q install -r requirements.txt
+   !WAF=luawaf python kaggle_waf_rl.py   # sanity run; drop WAF=luawaf for the real one
    ```
-3. **Add-ons → Secrets**: add `RELAY_URL` and `RELAY_API_KEY` (from step 0).
-4. **Settings**: Accelerator = GPU, Internet = ON.
-5. Run. It trains DQN against the WAF via the relay, checkpointing to
-   `/kaggle/working/ckpt` (resumes automatically on the next session).
-6. Evaluate: `!python eval.py run` (reads the checkpoints).
+4. Checkpoints + `eval_log.json` → `/kaggle/working/ckpt` (auto-resume next session).
+   Evaluate: `!python eval.py run`.
 
-Rotate accounts by hand when you hit the ~30h session cap: download
-`/kaggle/working/ckpt`, upload it to the other account's session, continue.
+Rotate accounts when you hit the ~30h cap: download `/kaggle/working/ckpt`,
+re-upload to the other account's session, continue — or use `kaggle_runner.py`.
 
 ---
 
