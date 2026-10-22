@@ -69,6 +69,14 @@ DEBUG_EPISODES = os.environ.get("DEBUG_EPISODES", "1") == "1"    # live per-epis
 # Needs the relay's RELAY_MAX_CONCURRENT >= N and Kali RAM/CPU headroom. Default 2;
 # set N_ENVS=1 to fall back to the proven single-env path if the parallel path errors.
 N_ENVS = int(os.environ.get("N_ENVS", "2"))
+SEED = int(os.environ.get("SEED", "0"))             # fix for cold-vs-warm fairness
+# Behavior-cloning warm start (ablation): WARM_START=1 pretrains the Q-net on a BC
+# dataset of successful (state, action) pairs before RL. WARM_START=0 = cold start
+# (random init, the Ouroboros baseline).
+WARM_START = os.environ.get("WARM_START", "0") == "1"
+BC_DATASET = os.environ.get("BC_DATASET", "bc_dataset.npz")
+BC_EPOCHS = int(os.environ.get("BC_EPOCHS", "20"))
+BC_LR = float(os.environ.get("BC_LR", "1e-3"))
 
 # ----------------------------------------------------------------------------
 # ACTION SPACE — 9 x 3 x 2 x 7 x 2 = 756 discrete actions
@@ -474,12 +482,20 @@ def train():
         print(f"[resume] loading {resume[-1]}")
         model = Algo.load(resume[-1], env=venv)
     else:
-        kw = dict(policy="MlpPolicy", env=venv, gamma=GAMMA, verbose=1,
+        kw = dict(policy="MlpPolicy", env=venv, gamma=GAMMA, verbose=1, seed=SEED,
                   tensorboard_log=os.path.join(CKPT_DIR, "tb"))
         if ALGO == "DQN":
             kw.update(buffer_size=20000, learning_starts=LEARNING_STARTS, train_freq=4,
                       target_update_interval=500, exploration_fraction=0.3)
         model = Algo(**kw)
+        # WARM START (ablation): behavior-clone the Q-net from successful (s,a) pairs
+        if WARM_START and os.path.exists(BC_DATASET):
+            from warmstart import behavior_clone
+            print(f"[warm-start] BC pretrain from {BC_DATASET}", flush=True)
+            behavior_clone(model, BC_DATASET, epochs=BC_EPOCHS, lr=BC_LR)
+        elif WARM_START:
+            print(f"[warm-start] WARM_START=1 but {BC_DATASET} missing -> cold start "
+                  f"(run: python warmstart.py collect --out {BC_DATASET})", flush=True)
 
     ckpt = CheckpointCallback(save_freq=500, save_path=CKPT_DIR,
                               name_prefix=f"{ALGO.lower()}_{WAF}")
