@@ -69,7 +69,7 @@ def get_dvwa_cookie(base_url, username="admin", password="password",
 
 def build_cmd(target, param, cookie, tamper, technique, level, risk,
               random_agent, extra, outdir, traffic_file, flush=True,
-              req_timeout=10, retries=1):
+              req_timeout=10, retries=0):   # SPEED MODE: no sqlmap retry
     cmd = [SQLMAP, "-u", target, "--batch", "--disable-coloring", "-v", "1",
            "--output-dir", outdir, "-t", traffic_file,
            "--timeout", str(req_timeout), "--retries", str(retries)]
@@ -199,7 +199,12 @@ def _timed_get(url, cookie, timeout=10):
 def probe_pair(target, param, cookie, tamper, base_payload="1' OR '1'='1' -- -",
                timeout=10):
     """Send chi_ORIG and the tamper-mutated chi_MUT through the WAF, timing each.
-    Feeds R_RUL (apct_mut - apct_orig) and R_REG (psi(orig) - psi(mut))."""
+    Feeds R_RUL (apct_mut - apct_orig) and R_REG (psi(orig) - psi(mut)).
+
+    TIMING SCOPE (per Minh): this runs ON KALI and `target` is the Ubuntu WAF's LAN
+    URL (e.g. http://192.168.244.128:8080/...). So T = Kali->Ubuntu->Kali (LAN only);
+    the Kaggle<->Kali ngrok/WAN leg is NOT included in APCT. _timed_get wraps only the
+    single LAN request. APCT = T/L, median of N probes."""
     mut, applied, failed = apply_tamper_chain(base_payload, tamper or [])
 
     def url_with(p):

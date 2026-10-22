@@ -119,8 +119,10 @@ def decode_action(idx):
 # ----------------------------------------------------------------------------
 # RELAY CLIENT
 # ----------------------------------------------------------------------------
-def call_kali(action, waf=WAF, timeout=EPISODE_TIMEOUT, retries=2):
-    """POST one action to the relay and return the executor telemetry dict."""
+def call_kali(action, waf=WAF, timeout=EPISODE_TIMEOUT):
+    """POST one action to the relay and return the executor telemetry dict.
+    SPEED MODE (per Minh): single attempt, NO retry, NO sleep/backoff. Any failure
+    (e.g. network/ngrok drop) raises and aborts the run -> rerun from scratch."""
     body = {
         "waf": waf,
         "tamper": action["tamper"],
@@ -137,24 +139,14 @@ def call_kali(action, waf=WAF, timeout=EPISODE_TIMEOUT, retries=2):
     }
     if RELAY_API_KEY:
         headers["X-API-Key"] = RELAY_API_KEY
-    last = None
-    for attempt in range(retries + 1):
-        req = urllib.request.Request(RELAY_URL + "/run", data=data,
-                                     headers=headers, method="POST")
-        try:
-            with urllib.request.urlopen(req, timeout=timeout + 15) as r:
-                return json.loads(r.read().decode())
-        except Exception as e:  # noqa: BLE001 - any failure -> visible, then retry
-            last = e
-            print(f"[relay] call failed (attempt {attempt+1}/{retries+1}): {e}", flush=True)
-            time.sleep(2 * (attempt + 1))
-    print(f"[relay] UNREACHABLE after {retries+1} tries -> {RELAY_URL} ({last}); "
-          f"returning empty episode (found=False)", flush=True)
-    return {"found": False, "requests": 0, "blocked_responses": 0,
-            "block_ratio": 0.0, "duration_s": 0.0, "timed_out": True,
-            "error": f"relay unreachable: {last}", "techniques": [],
-            "dbms": None, "payloads": [], "waf_warned": False,
-            "not_injectable": True}
+    req = urllib.request.Request(RELAY_URL + "/run", data=data,
+                                 headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout + 15) as r:
+            return json.loads(r.read().decode())
+    except Exception as e:  # noqa: BLE001 - no retry, no sleep: fail fast by design
+        raise RuntimeError(
+            f"[relay] call failed, aborting run (SPEED MODE = no retry): {e}") from e
 
 
 def preflight():

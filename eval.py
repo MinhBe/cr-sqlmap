@@ -265,9 +265,10 @@ def evaluate(ckpt_dir=None, seeds=(42, 123, 456, 789, 1024), n_episodes=50, waf=
     el_path = os.path.join(ckpt_dir, "eval_log.json")
     eval_log = json.load(open(el_path)) if os.path.exists(el_path) else None
     report["groupD"] = group_D(eval_log=eval_log)
-    report["notes"] = ["Group B transfer_matrix/spearman need 2nd-WAF (:8081) bypass sets + "
-                       "APCT/depth pairs; Group D covariate_shift needs a trained FA2RNN; "
-                       "rho_e needs per-checkpoint compute_hours - wire from the run."]
+    report["notes"] = ["SINGLE-WAF mode (modsec only): Group B cross-WAF transfer_matrix is "
+                       "N/A (no 2nd WAF running); TSR/FNR + Spearman(APCT,depth) still apply. "
+                       "Group D covariate_shift needs a trained FA2RNN; rho_e needs per-checkpoint "
+                       "compute_hours - wire from the run."]
     return report
 
 
