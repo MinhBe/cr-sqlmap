@@ -68,8 +68,12 @@ DEBUG_EPISODES = os.environ.get("DEBUG_EPISODES", "1") == "1"    # live per-epis
 # Parallel environments: N concurrent episodes (SubprocVecEnv) for ~N x throughput.
 # Needs the relay's RELAY_MAX_CONCURRENT >= N and Kali RAM/CPU headroom. Default 2;
 # set N_ENVS=1 to fall back to the proven single-env path if the parallel path errors.
-N_ENVS = int(os.environ.get("N_ENVS", "2"))
+N_ENVS = int(os.environ.get("N_ENVS", "8"))         # I/O-bound env -> many parallel envs
 SEED = int(os.environ.get("SEED", "0"))             # fix for cold-vs-warm fairness
+# Circuit breaker temporarily OFF per Minh (speed/full-tilt; re-enable later with
+# CIRCUIT_BREAKER=1). When off, the anti-reward-hacking + compute-runaway monitor
+# is not attached to training.
+CIRCUIT_BREAKER = os.environ.get("CIRCUIT_BREAKER", "0") == "1"
 # Behavior-cloning warm start (ablation): WARM_START=1 pretrains the Q-net on a BC
 # dataset of successful (state, action) pairs before RL. WARM_START=0 = cold start
 # (random init, the Ouroboros baseline).
@@ -491,11 +495,12 @@ def train():
 
     ckpt = CheckpointCallback(save_freq=500, save_path=CKPT_DIR,
                               name_prefix=f"{ALGO.lower()}_{WAF}")
-    callbacks = [
-        ckpt,
-        CircuitBreakerCallback(cb, beta_state),
-        GoldEvalCallback(make_env(waf=WAF), cb, GOLD_EVAL_EVERY, GOLD_EVAL_K),
-    ]
+    callbacks = [ckpt, GoldEvalCallback(make_env(waf=WAF), cb, GOLD_EVAL_EVERY, GOLD_EVAL_K)]
+    if CIRCUIT_BREAKER:
+        callbacks.insert(1, CircuitBreakerCallback(cb, beta_state))
+        print("[train] circuit-breaker ON", flush=True)
+    else:
+        print("[train] circuit-breaker OFF (temporary, set CIRCUIT_BREAKER=1 to re-enable)", flush=True)
     model.learn(total_timesteps=TOTAL_TIMESTEPS, callback=callbacks,
                 log_interval=1, reset_num_timesteps=not bool(resume))
     model.save(os.path.join(CKPT_DIR, f"{ALGO.lower()}_{WAF}_final"))

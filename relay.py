@@ -27,7 +27,9 @@ import executor
 
 API_KEY = os.environ.get("RELAY_API_KEY", "")
 
-TARGET = "192.168.244.128"
+# Single-host on Kali: backend (modsec+DVWA) runs locally on 127.0.0.1:8080.
+# (Was 192.168.244.128 = Ubuntu over LAN; Ubuntu dropped in the single-host move.)
+TARGET = os.environ.get("TARGET_HOST", "127.0.0.1")
 TARGETS = {
     "modsec": {  # ModSecurity + OWASP-CRS v3.2.0 (REQUEST-942 only)
         "base": f"http://{TARGET}:8080",

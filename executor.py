@@ -201,10 +201,10 @@ def probe_pair(target, param, cookie, tamper, base_payload="1' OR '1'='1' -- -",
     """Send chi_ORIG and the tamper-mutated chi_MUT through the WAF, timing each.
     Feeds R_RUL (apct_mut - apct_orig) and R_REG (psi(orig) - psi(mut)).
 
-    TIMING SCOPE (per Minh): this runs ON KALI and `target` is the Ubuntu WAF's LAN
-    URL (e.g. http://192.168.244.128:8080/...). So T = Kali->Ubuntu->Kali (LAN only);
-    the Kaggle<->Kali ngrok/WAN leg is NOT included in APCT. _timed_get wraps only the
-    single LAN request. APCT = T/L, median of N probes."""
+    TIMING SCOPE (per Minh): this runs ON KALI and `target` is the local backend
+    (single-host: http://127.0.0.1:8080/...). So T = Kali->localhost->Kali = pure WAF
+    rule-processing time, with NO LAN or Kaggle/tunnel (WAN) jitter in APCT. _timed_get
+    wraps only the single local request. APCT = T/L, median of N probes."""
     mut, applied, failed = apply_tamper_chain(base_payload, tamper or [])
 
     def url_with(p):
