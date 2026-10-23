@@ -43,6 +43,14 @@ import urllib.request
 SQLMAP = os.environ.get("SQLMAP_BIN", "sqlmap")
 SQLMAP_HOME = os.environ.get("SQLMAP_HOME", "/usr/share/sqlmap")
 
+# Offline libinjection oracle (Phase 1). Present on Kali where the executor runs; the
+# probe attaches the mutated payload's libinjection verdict so the trainer can shape the
+# dense R_LIB reward without shipping libinjection to Kaggle. Optional: absent -> None.
+try:
+    import libinj_oracle
+except Exception:  # noqa: BLE001
+    libinj_oracle = None
+
 # --- DVWA auth -------------------------------------------------------------
 
 def get_dvwa_cookie(base_url, username="admin", password="password",
@@ -226,11 +234,20 @@ def probe_pair(target, param, cookie, tamper, base_payload="1' OR '1'='1' -- -",
         t_o, s_o = timed_median(url_with(base_payload))
         t_m, s_m = timed_median(url_with(mut))
     l_o, l_m = max(1, len(base_payload)), max(1, len(mut))
+    # libinjection verdict on chi_MUT (modsec-faithful: replays rule 942100 transforms).
+    # libinj_sqli=False => the tamper chain pushed the fingerprint OUT of libinjection's
+    # bad-set => candidate to slip 942100. This is the local w1 signal for R_LIB.
+    if libinj_oracle is not None:
+        lv = libinj_oracle.verdict(mut, modsec=True)
+        libinj_sqli, libinj_fp = lv["sqli"], lv["fingerprint"]
+    else:
+        libinj_sqli, libinj_fp = None, ""
     return {
         "orig": base_payload, "mut": mut,
         "L_orig": l_o, "L_mut": l_m, "T_orig": t_o, "T_mut": t_m,
         "apct_orig": round(t_o / l_o, 6), "apct_mut": round(t_m / l_m, 6),
         "status_orig": s_o, "status_mut": s_m,
+        "libinj_sqli": libinj_sqli, "libinj_fp": libinj_fp,
         "applied_tampers": applied, "failed_tampers": failed,
         "changed": mut != base_payload,
     }

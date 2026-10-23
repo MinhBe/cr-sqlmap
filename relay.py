@@ -24,6 +24,7 @@ import threading
 from flask import Flask, jsonify, request
 
 import executor
+import libinj_oracle
 
 API_KEY = os.environ.get("RELAY_API_KEY", "")
 
@@ -52,7 +53,27 @@ _sem = threading.BoundedSemaphore(_MAX_CONCURRENT)
 
 @app.get("/health")
 def health():
-    return jsonify(status="ok", targets=list(TARGETS), auth_required=bool(API_KEY))
+    return jsonify(status="ok", targets=list(TARGETS), auth_required=bool(API_KEY),
+                   libinj=True)
+
+
+@app.post("/libinj")
+def libinj():
+    """Offline libinjection oracle (no WAF round-trip). Body: {"payload": "..."} or
+    {"payloads": ["...", ...]}. Returns per-payload {sqli, fingerprint}. This is the
+    dense local signal (R_LIB / GA fitness): sqli=False => fingerprint left libinjection's
+    bad-set => candidate to slip CRS rule 942100."""
+    if API_KEY and request.headers.get("X-API-Key") != API_KEY:
+        return jsonify(error="unauthorized"), 401
+    body = request.get_json(force=True, silent=True) or {}
+    payloads = body.get("payloads")
+    if payloads is None:
+        one = body.get("payload")
+        if one is None:
+            return jsonify(error="provide 'payload' or 'payloads'"), 400
+        payloads = [one]
+    results = [dict(payload=p, **libinj_oracle.verdict(p)) for p in payloads]
+    return jsonify(results=results)
 
 
 @app.post("/run")

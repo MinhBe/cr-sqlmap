@@ -74,16 +74,21 @@ Concatenation of a **24-dim engineered vector** and a **768-dim BERT embedding**
   **deep-learning encoder** — it turns messy episode telemetry into a dense
   vector the policy network can use.
 
-### 3.2 Action $a_t \in \{0,\dots,755\}$ (756 discrete)
+### 3.2 Action $a_t \in \{0,\dots,1295\}$ (1296 discrete)
 
 One integer decodes to a full sqlmap configuration:
-$$ 756 = \underbrace{9}_{\text{technique}} \times \underbrace{3}_{\text{level}}
-\times \underbrace{2}_{\text{risk}} \times \underbrace{7}_{\text{tamper/operator}}
+$$ 1296 = \underbrace{9}_{\text{technique}} \times \underbrace{3}_{\text{level}}
+\times \underbrace{2}_{\text{risk}} \times \underbrace{12}_{\text{tamper preset}}
 \times \underbrace{2}_{\text{random-agent}} $$
 i.e. *which* SQLi techniques (B/E/U/S/T/Q and combos), how hard sqlmap tries
-(level, risk), which **tamper/evasion scripts** to apply (none … `space2comment`,
-`between`, `randomcase`, `charencode`, combos), and whether to randomize the
-User-Agent. The tamper choice is the main evasion lever.
+(level, risk), which **tamper/evasion scripts** to apply, and whether to randomize
+the User-Agent. The tamper choice is the main evasion lever. The 12 presets were
+**redesigned for the libinjection target** (Phase 2): grouped by defence layer
+(L = libinjection tokenizer / R = CRS regex / A = anomaly), leaning on **multi-op
+stacks** because empirically **no single tamper** bypasses modsec+CRS with data
+(AutoSpear's finding). Case-only / pure-encoding ops are deprioritised (libinjection
+is case-insensitive; modsec `urlDecodeUni`-decodes before rule 942100). See
+`CR-sqlmap_libinjection_extension.md`.
 
 ### 3.3 Reward — the heart of the method
 
@@ -104,8 +109,18 @@ $$ R_{RUL} = \text{APCT}_{MUT} - \text{APCT}_{ORIG} $$
 detector* $\psi$ (the FA2RNN, §5), i.e. lowered its "malicious" probability:
 $$ R_{REG} = \psi(\chi_{ORIG}) - \psi(\chi_{MUT}) $$
 
-**Symbolic reward** (Eq. 8) — unweighted sum, clipped to $[0,10]$:
-$$ R_{SYN} = \min\!\big(10,\ \max(0,\ R_{SYS} + R_{RUL} + R_{REG})\big) $$
+**(d) Libinjection-layer reward** $R_{LIB}$ (CR-sqlmap extension for the libinjection
+target) — a **dense local** signal from the offline libinjection oracle, available
+*before* a full success, which is what fixes reward≈0 against modsec+CRS:
+$$ R_{LIB} = w_{fp}\,\mathbb{1}[\text{fingerprint left libinjection's bad-set}]
++ w_{pass}\,\mathbb{1}[\chi_{MUT}\text{ not blocked (200)}] - w_{len}\tfrac{|\chi_{MUT}|}{L_{\max}} $$
+Measured on the live WAF: `randomcomments` → +2.96 (fingerprint out + 200), blocked/
+encoded chains ≤ 0. Flag `LIBINJ_REWARD=0` disables it (→ faithful Ouroboros). Full
+math: `CR-sqlmap_libinjection_extension.md`.
+
+**Symbolic reward** (Eq. 8) — unweighted sum, clipped to $[0,10]$ ($R_{LIB}$ joins the
+dense bundle; it never touches the true outcome $R_{SYS}$):
+$$ R_{SYN} = \min\!\big(10,\ \max(0,\ R_{SYS} + R_{RUL} + R_{REG} + R_{LIB})\big) $$
 
 **Annealed hybrid** (our addition) — blend the sparse true outcome
 $R_{\text{outcome}}=R_{SYS}$ with the dense symbolic reward, annealing the
@@ -132,7 +147,7 @@ can look flat if it's already near the ceiling on an easy WAF).
 The agent learns an **action-value function** $Q(s,a)$ = expected future reward
 of taking action $a$ in state $s$. Tabular Q-learning can't handle a
 792-dim continuous state, so $Q$ is a **neural network** $Q_\theta$ (an MLP over
-the 792-dim state → 756 action-values). Core update (Bellman / temporal
+the 792-dim state → 1296 action-values). Core update (Bellman / temporal
 difference):
 $$ Q_\theta(s_t,a_t) \leftarrow Q_\theta(s_t,a_t) + \eta\Big[\,
 \underbrace{r_t + \gamma \max_{a'} Q_{\theta^-}(s_{t+1},a')}_{\text{TD target}}
@@ -210,9 +225,11 @@ Transfer rate: $\text{TransferRate}(A\!\to\!B) = \dfrac{|\{x: x \text{ bypasses 
 
 | file | role |
 |---|---|
-| `executor.py` | runs one sqlmap episode → JSON telemetry; builds the χ_ORIG/χ_MUT APCT probe |
-| `relay.py` | Flask relay on Kali (API-key auth, lab-only targets, bounded concurrency) |
-| `kaggle_waf_rl.py` | Gym env + DQN + 792-d state + annealed reward + gold-eval + N parallel envs |
+| `executor.py` | runs one sqlmap episode → JSON telemetry; builds the χ_ORIG/χ_MUT APCT probe (+ libinjection verdict) |
+| `relay.py` | Flask relay on Kali (API-key auth, lab-only targets, bounded concurrency, `/libinj` oracle) |
+| `libinj_oracle.py` | offline libinjection oracle (ctypes); replays rule-942100 transforms → verdict + fingerprint |
+| `kaggle_waf_rl.py` | Gym env + DQN + 792-d state + annealed reward (incl. $R_{LIB}$) + gold-eval + N parallel envs |
+| `ga.py` | Ouroboros GA rule-extraction: erosion→TF-IDF→DBSCAN→LCS→16-gene evolution → WAF-rule regex |
 | `circuit_breakers.py` | γ (anti-reward-hacking) + compute-runaway breakers |
 | `fa2rnn.py` | the FA-RNN model for $R_{REG}$ (regex → weighted-FA → linear RNN → ψ) |
 | `eval.py` | metric Groups A–D, multi-seed CI |

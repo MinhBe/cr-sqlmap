@@ -7,7 +7,7 @@ Two pieces:
   1) collect(): run the env and log (state, action) pairs for the actions that
      SUCCESSFULLY evaded the WAF (telemetry.found == True) -> a BC dataset.
   2) behavior_clone(): supervised pretrain of the DQN's Q-network to predict the
-     successful action from the state (cross-entropy over the 756 discrete
+     successful action from the state (cross-entropy over the discrete
      actions, Q-values as logits), then copy weights into the target net. Call it
      after building the SB3 model and before model.learn() -> warm start.
 
@@ -22,11 +22,19 @@ import argparse
 import os
 
 
-def collect(waf=None, n_success=500, out_path="bc_dataset.npz", seed=0, max_steps=20000):
-    """Collect `n_success` successful (state, action) pairs with a random policy."""
+def collect(waf=None, n_success=500, out_path="bc_dataset.npz", seed=0, max_steps=20000,
+            guided=False):
+    """Collect `n_success` (state, action) pairs with a random policy for BC warm-start.
+
+    Default: keep pairs whose action fully evaded the WAF (telemetry.found).
+    guided=True (Minh's guided variant): ALSO keep pairs showing evasive PROGRESS -- the
+    tampered payload left libinjection's bad-set (probe.libinj_sqli is False) AND passed
+    the WAF (probe.status_mut==200) -- even without a full sqlmap success. Against the hard
+    modsec target full successes are rare, so this seeds the prior from sqlmap-confirmed
+    evasive trajectories instead of a cold start."""
     import numpy as np
     import kaggle_waf_rl as K
-    waf = waf or os.environ.get("BC_WAF", "luawaf")
+    waf = waf or os.environ.get("BC_WAF", "modsec" if guided else "luawaf")
     env = K.make_env(waf=waf)
     obs, _ = env.reset(seed=seed)
     X, Y = [], []
@@ -36,7 +44,12 @@ def collect(waf=None, n_success=500, out_path="bc_dataset.npz", seed=0, max_step
         prev = obs
         obs, _, term, trunc, info = env.step(int(a))
         steps += 1
-        if info.get("telemetry", {}).get("found"):
+        tele = info.get("telemetry", {})
+        keep = bool(tele.get("found"))
+        if guided and not keep:
+            pr = tele.get("probe") or {}
+            keep = (pr.get("libinj_sqli") is False) and (pr.get("status_mut") == 200)
+        if keep:
             X.append(np.asarray(prev, dtype=np.float32)); Y.append(int(a))
         if term or trunc:
             obs, _ = env.reset()
@@ -86,12 +99,15 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd")
     c = sub.add_parser("collect")
-    c.add_argument("--waf", default=os.environ.get("BC_WAF", "luawaf"))
+    c.add_argument("--waf", default=os.environ.get("BC_WAF"))
     c.add_argument("--n", type=int, default=int(os.environ.get("BC_N", "500")))
     c.add_argument("--out", default=os.environ.get("BC_DATASET", "bc_dataset.npz"))
     c.add_argument("--seed", type=int, default=0)
+    c.add_argument("--guided", action="store_true",
+                   default=os.environ.get("BC_GUIDED", "0") == "1")
     args = ap.parse_args()
     if args.cmd == "collect":
-        collect(waf=args.waf, n_success=args.n, out_path=args.out, seed=args.seed)
+        collect(waf=args.waf, n_success=args.n, out_path=args.out, seed=args.seed,
+                guided=args.guided)
     else:
         ap.print_help()

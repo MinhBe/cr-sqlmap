@@ -83,28 +83,45 @@ BC_EPOCHS = int(os.environ.get("BC_EPOCHS", "20"))
 BC_LR = float(os.environ.get("BC_LR", "1e-3"))
 
 # ----------------------------------------------------------------------------
-# ACTION SPACE — 9 x 3 x 2 x 7 x 2 = 756 discrete actions
+# ACTION SPACE — 9 x 3 x 2 x 12 x 2 = 1296 discrete actions
 # (filling in the technique/operator presets the master doc left open — adjust freely)
 # ----------------------------------------------------------------------------
 TECHNIQUES = ["B", "E", "U", "S", "T", "Q", "BE", "BEU", "BEUSTQ"]        # 9
 LEVELS = [1, 2, 3]                                                         # 3
 RISKS = [1, 2]                                                             # 2
-OPERATORS = [                                                              # 7 tamper presets
-    [],                                              # 0: no tamper
-    ["space2comment"],                               # 1
-    ["between"],                                     # 2
-    ["randomcase"],                                  # 3
-    ["charencode"],                                  # 4
-    ["space2comment", "between", "randomcase"],      # 5
-    ["apostrophemask", "equaltolike", "between"],    # 6
+# Tamper presets, redesigned for the libinjection target (Phase 2). Grouped by which
+# defence layer they attack per the research catalog (L=libinjection tokenizer/fingerprint,
+# R=CRS regex, A=anomaly). EMPIRICAL (oracle + live WAF, 2026-10-23): NO single tamper
+# yields a UNION bypass-with-data against modsec 3.0.17/CRS -- consistent with AutoSpear:
+# bypasses need COMBOS + positioning. So presets lean on multi-op stacks across layers,
+# and the GA (Phase 4) searches the combo/position space the agent cannot enumerate.
+# Pure case/encoding-only ops are deprioritised (libinjection is case-insensitive and
+# modsec urlDecodeUni-decodes before rule 942100, so encodings alone are reversed).
+OPERATORS = [                                                              # 12 presets
+    [],                                                                      # 0 baseline
+    # --- libinjection-layer: comment / token-structure ---
+    ["randomcomments"],                                                      # 1  L
+    ["space2comment", "randomcomments"],                                     # 2  L+R
+    ["modsecurityversioned", "randomcomments"],                              # 3  L+R
+    ["commentbeforeparentheses", "randomcomments"],                          # 4  L
+    # --- function / operator / keyword-shape rewriting ---
+    ["symboliclogical", "between"],                                          # 5  L+R
+    ["equaltolike", "greatest"],                                             # 6  L+R
+    ["concat2concatws", "randomcase"],                                       # 7  L+R
+    # --- CRS-regex-layer: encoding ---
+    ["charunicodeencode"],                                                   # 8  R
+    ["apostrophemask", "charencode"],                                        # 9  R
+    # --- cross-layer stacks (AutoSpear-style multi-op) ---
+    ["modsecurityversioned", "symboliclogical", "randomcomments"],           # 10 L+R
+    ["space2randomblank", "between", "charunicodeencode", "randomcase"],      # 11 L+R+A
 ]
 RANDOM_AGENT = [False, True]                                               # 2
 N_ACTIONS = len(TECHNIQUES) * len(LEVELS) * len(RISKS) * len(OPERATORS) * len(RANDOM_AGENT)
-assert N_ACTIONS == 756, N_ACTIONS
+assert N_ACTIONS == 1296, N_ACTIONS
 
 
 def decode_action(idx):
-    """Map a discrete action index in [0,756) to concrete sqlmap params."""
+    """Map a discrete action index in [0,1296) to concrete sqlmap params."""
     i = int(idx)
     i, ra = divmod(i, len(RANDOM_AGENT))
     i, op = divmod(i, len(OPERATORS))
@@ -191,6 +208,21 @@ class SoftChecklist:
             self.ema[i] = (1 - self.alpha) * self.ema[i] + self.alpha * present_and_passed
         return list(self.ema)
 
+# --- R_LIB: dense libinjection-layer reward (Phase 3) -----------------------
+# Fixes reward-is-zero against libinjection by giving signal BEFORE a full sqlmap success:
+#   R_LIB = W_FP  * 1[fingerprint left libinjection's bad-set]   (local oracle on chi_MUT)
+#         + W_PASS* 1[chi_MUT not blocked by the WAF (HTTP 200)]
+#         - W_LEN * min(len(chi_MUT)/LMAX, 1)                     (prefer shorter payloads)
+# Added into the dense surrogate bundle R_SYN (clipped 0..10) only, so it shapes early
+# training and fades as beta anneals DOWN; it never touches the true outcome R_SYS.
+# Flag-gated: LIBINJ_REWARD=0 reverts to faithful Ouroboros (R_SYN=R_SYS+R_RUL+R_REG).
+LIBINJ_REWARD = os.environ.get("LIBINJ_REWARD", "1") == "1"
+R_LIB_W_FP = float(os.environ.get("R_LIB_W_FP", "2.0"))
+R_LIB_W_PASS = float(os.environ.get("R_LIB_W_PASS", "1.0"))
+R_LIB_W_LEN = float(os.environ.get("R_LIB_W_LEN", "0.5"))
+R_LIB_LMAX = float(os.environ.get("R_LIB_LMAX", "256.0"))
+
+
 # ----------------------------------------------------------------------------
 # REWARD COMBINER
 # ----------------------------------------------------------------------------
@@ -236,16 +268,33 @@ class RewardCombiner:
             return 0.0
         return float(fa2rnn.delta(pr["orig"], pr["mut"]))
 
+    @staticmethod
+    def r_lib(tele):
+        """Dense libinjection-layer signal from the chi_MUT probe. 0 when disabled, no
+        probe, or the oracle was unavailable (stays faithful)."""
+        if not LIBINJ_REWARD:
+            return 0.0
+        pr = tele.get("probe") or {}
+        sqli = pr.get("libinj_sqli")
+        if sqli is None:                      # oracle unavailable -> no signal
+            return 0.0
+        fp_out = 0.0 if sqli else 1.0         # fingerprint left the bad-set
+        waf_pass = 1.0 if pr.get("status_mut") == 200 else 0.0
+        plen = len(pr.get("mut", "") or "")
+        len_pen = min(plen / R_LIB_LMAX, 1.0)
+        return R_LIB_W_FP * fp_out + R_LIB_W_PASS * waf_pass - R_LIB_W_LEN * len_pen
+
     def compute(self, tele, fa2rnn=None):
         r_sys = self.r_sys(tele)
         r_rul = self.r_rul(tele)
         r_reg = self.r_reg(tele, fa2rnn)
-        r_syn = max(0.0, min(10.0, r_sys + r_rul + r_reg))
+        r_lib = self.r_lib(tele)
+        r_syn = max(0.0, min(10.0, r_sys + r_rul + r_reg + r_lib))
         r_outcome = r_sys  # pure sparse outcome
         beta = self.beta()
         r_total = (1 - beta) * r_outcome + beta * r_syn
         self._t += 1
-        return r_total, {"R_SYS": r_sys, "R_RUL": r_rul, "R_REG": r_reg,
+        return r_total, {"R_SYS": r_sys, "R_RUL": r_rul, "R_REG": r_reg, "R_LIB": r_lib,
                          "R_SYN": r_syn, "R_outcome": r_outcome, "beta": beta}
 
 # ----------------------------------------------------------------------------
@@ -327,7 +376,7 @@ def make_env(waf=WAF, ep_len=EP_LEN, total_timesteps=TOTAL_TIMESTEPS):
             self.reward_fn = RewardCombiner(total_timesteps)
             self.checklist = SoftChecklist()
             self.bert = BertEncoder()
-            self.fa2rnn = None   # set to a trained fa2rnn.FA2RNNReward to turn on R_REG
+            self.fa2rnn = _auto_reg_reward()  # Phase 4: GA->FA2RNN R_REG when GA_REG=1, else None
             self._step = 0
 
         def set_beta(self, b0, b1):
@@ -370,6 +419,55 @@ def make_env(waf=WAF, ep_len=EP_LEN, total_timesteps=TOTAL_TIMESTEPS):
             return self._obs(tele, action), float(reward), terminated, truncated, info
 
     return WafEvasionEnv()
+
+# ----------------------------------------------------------------------------
+# PHASE 4 CLOSED LOOP: GA rule-extraction -> FA2RNN -> R_REG (Eq7)
+# ----------------------------------------------------------------------------
+GA_REG = os.environ.get("GA_REG", "0") == "1"      # default off: R_LIB is already dense
+GA_BLOCKED = os.environ.get("GA_BLOCKED", "blocked_payloads.txt")
+_REG_CACHE = {}
+
+
+def reg_reward_from_ga(blocked_payloads, positives=None, guided=False):
+    """GA-extract WAF-rule regexes from blocked payloads (ga.run_ga), build+train FA2RNN,
+    return a fa2rnn.FA2RNNReward for R_REG. Set env.fa2rnn to it to enable R_REG. Heavy
+    (torch). guided=True directs generalisation from sqlmap-confirmed evasive payloads
+    (declared variant). Returns None if no usable regex extracted."""
+    import ga as _ga
+    import fa2rnn as _fa
+    rules = _ga.run_ga(blocked_payloads, guided=guided)
+    regexes = [r["regex"] for r in rules if r.get("regex")]
+    if not regexes:
+        return None
+    model = _fa.build_fa2rnn(regexes=regexes)
+    _fa.train_fa2rnn(model, positives if positives is not None else list(blocked_payloads))
+    return _fa.FA2RNNReward(model)
+
+
+def _auto_reg_reward():
+    """Per-process R_REG provider when GA_REG=1: GA over the blocked-payloads corpus at
+    GA_BLOCKED. Degrades to None (R_REG off, faithful R_LIB-only pipeline) on any error,
+    so enabling it can never break the tested path."""
+    if not GA_REG:
+        return None
+    if "r" in _REG_CACHE:
+        return _REG_CACHE["r"]
+    r = None
+    try:
+        if os.path.exists(GA_BLOCKED):
+            payloads = [ln.strip() for ln in open(GA_BLOCKED, encoding="utf-8",
+                        errors="replace") if ln.strip()]
+            r = reg_reward_from_ga(payloads,
+                                   guided=os.environ.get("GA_GUIDED", "0") == "1")
+            print(f"[R_REG] FA2RNN built from GA over {len(payloads)} blocked payloads: "
+                  f"{'on' if r else 'no-regex'}", flush=True)
+        else:
+            print(f"[R_REG] GA_REG=1 but {GA_BLOCKED} missing -> R_REG off", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[R_REG] build failed ({exc}) -> R_REG off", flush=True)
+    _REG_CACHE["r"] = r
+    return r
+
 
 # ----------------------------------------------------------------------------
 # TRAIN  (DQN/PPO via stable-baselines3, with checkpoint/resume)
