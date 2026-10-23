@@ -410,11 +410,19 @@ def make_env(waf=WAF, ep_len=EP_LEN, total_timesteps=TOTAL_TIMESTEPS):
             terminated = bool(tele.get("found"))   # episode ends on a successful evasion
             truncated = self._step >= self.ep_len
             if DEBUG_EPISODES:
+                pr = tele.get("probe") or {}
+                pays = tele.get("payloads") or []
                 print(f"[ep step={self._step}] {self.waf} {action['technique']}"
                       f"/L{action['level']}/R{action['risk']}/ra={action['random_agent']} "
+                      f"tamper={','.join(action['tamper']) or 'none'} "
                       f"found={tele.get('found')} block={tele.get('block_ratio')} "
-                      f"req={tele.get('requests')} r={reward:.2f}"
+                      f"req={tele.get('requests')} r={reward:.2f} Rlib={parts.get('R_LIB', 0):.1f}"
                       + (f" ERR={tele['error']}" if tele.get('error') else ""), flush=True)
+                # visibility: the actual evasion payload + what libinjection/WAF said about it
+                print(f"      chi_MUT={pr.get('mut', '')!r} libinj_sqli={pr.get('libinj_sqli')} "
+                      f"http={pr.get('status_mut')}"
+                      + (f"  >>> HIT dbms={tele.get('dbms')} payload={pays[:1]}"
+                         if tele.get('found') else ""), flush=True)
             info = {"telemetry": tele, "reward_parts": parts, "action": action}
             return self._obs(tele, action), float(reward), terminated, truncated, info
 
