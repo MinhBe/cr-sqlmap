@@ -31,12 +31,20 @@ API_KEY = os.environ.get("RELAY_API_KEY", "")
 # Single-host on Kali: backend (modsec+DVWA) runs locally on 127.0.0.1:8080.
 # (Was 192.168.244.128 = Ubuntu over LAN; Ubuntu dropped in the single-host move.)
 TARGET = os.environ.get("TARGET_HOST", "127.0.0.1")
+# Difficulty curriculum (Minh): train easy->hard.
+#   direct : no WAF            -> baseline + "still-injects" oracle
+#   regex  : CRS regex-only    -> libinjection rule 942100 disabled (Ouroboros-paper style)
+#   modsec : CRS full          -> regex + libinjection (the hard target)
 TARGETS = {
-    "modsec": {  # ModSecurity + OWASP-CRS v3.2.0 (REQUEST-942 only)
+    "modsec": {  # CRS full: regex + libinjection (942100 on)
         "base": f"http://{TARGET}:8080",
         "url":  f"http://{TARGET}:8080/vulnerabilities/sqli/?id=1&Submit=Submit",
     },
-    "luawaf": {  # ngx_lua_waf
+    "regex": {   # CRS regex-only: 942100 (libinjection) removed
+        "base": f"http://{TARGET}:8082",
+        "url":  f"http://{TARGET}:8082/vulnerabilities/sqli/?id=1&Submit=Submit",
+    },
+    "direct": {  # no WAF (DVWA direct) — baseline / inject-validity oracle
         "base": f"http://{TARGET}:8081",
         "url":  f"http://{TARGET}:8081/vulnerabilities/sqli/?id=1&Submit=Submit",
     },

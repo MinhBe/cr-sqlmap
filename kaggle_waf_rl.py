@@ -83,12 +83,15 @@ BC_EPOCHS = int(os.environ.get("BC_EPOCHS", "20"))
 BC_LR = float(os.environ.get("BC_LR", "1e-3"))
 
 # ----------------------------------------------------------------------------
-# ACTION SPACE — 9 x 3 x 2 x 12 x 2 = 1296 discrete actions
-# (filling in the technique/operator presets the master doc left open — adjust freely)
+# ACTION SPACE — 8 x 5 x 3 x 12 x 2 = 2880 discrete actions
+# Time-based technique 'T' DROPPED (Minh): SLEEP waits = huge slowdown + unreliable timing.
+# LEVELS/RISKS extended to 5/3: a real sqlmap bypass of the regex WAF (:8082) was CONFIRMED
+# only at level 5 / risk 3 (modsecurityzeroversioned+space2comment -> boolean-blind, ~1157
+# req); the old max of L3/R2 could not reach that region, so found was unreachable.
 # ----------------------------------------------------------------------------
-TECHNIQUES = ["B", "E", "U", "S", "T", "Q", "BE", "BEU", "BEUSTQ"]        # 9
-LEVELS = [1, 2, 3]                                                         # 3
-RISKS = [1, 2]                                                             # 2
+TECHNIQUES = ["B", "E", "U", "S", "Q", "BE", "BEU", "BEUSQ"]              # 8 (no 'T')
+LEVELS = [1, 2, 3, 4, 5]                                                   # 5
+RISKS = [1, 2, 3]                                                          # 3
 # Tamper presets, redesigned for the libinjection target (Phase 2). Grouped by which
 # defence layer they attack per the research catalog (L=libinjection tokenizer/fingerprint,
 # R=CRS regex, A=anomaly). EMPIRICAL (oracle + live WAF, 2026-10-23): NO single tamper
@@ -99,29 +102,28 @@ RISKS = [1, 2]                                                             # 2
 # modsec urlDecodeUni-decodes before rule 942100, so encodings alone are reversed).
 OPERATORS = [                                                              # 12 presets
     [],                                                                      # 0 baseline
-    # --- libinjection-layer: comment / token-structure ---
-    ["randomcomments"],                                                      # 1  L
-    ["space2comment", "randomcomments"],                                     # 2  L+R
-    ["modsecurityversioned", "randomcomments"],                              # 3  L+R
-    ["commentbeforeparentheses", "randomcomments"],                          # 4  L
-    # --- function / operator / keyword-shape rewriting ---
-    ["symboliclogical", "between"],                                          # 5  L+R
-    ["equaltolike", "greatest"],                                             # 6  L+R
-    ["concat2concatws", "randomcase"],                                       # 7  L+R
-    # --- CRS-regex-layer: encoding ---
-    ["charunicodeencode"],                                                   # 8  R
-    ["apostrophemask", "charencode"],                                        # 9  R
-    # --- cross-layer stacks (AutoSpear-style multi-op) ---
+    # --- PROVEN regex-WAF (:8082) bypasses (real sqlmap, L5/R3) ---
+    ["modsecurityzeroversioned", "space2comment"],                           # 1  *** confirmed
+    ["modsecurityversioned", "space2comment"],                               # 2  versioned variant
+    ["modsecurityversioned", "charencode", "space2comment", "between"],      # 3  *** confirmed
+    # --- regex-oriented keyword/operator rewriting (+comment) ---
+    ["space2comment", "between"],                                            # 4  R
+    ["between", "randomcase"],                                               # 5  R
+    ["equaltolike", "greatest"],                                             # 6  R
+    ["symboliclogical", "between"],                                          # 7  R
+    # --- libinjection-layer probes (for the :8080 hard stage) ---
+    ["randomcomments"],                                                      # 8  L (evades libinj; often breaks SQL)
+    ["charunicodeencode", "space2comment"],                                  # 9  R
     ["modsecurityversioned", "symboliclogical", "randomcomments"],           # 10 L+R
-    ["space2randomblank", "between", "charunicodeencode", "randomcase"],      # 11 L+R+A
+    ["space2randomblank", "between", "charunicodeencode", "randomcase"],      # 11 R+A
 ]
 RANDOM_AGENT = [False, True]                                               # 2
 N_ACTIONS = len(TECHNIQUES) * len(LEVELS) * len(RISKS) * len(OPERATORS) * len(RANDOM_AGENT)
-assert N_ACTIONS == 1296, N_ACTIONS
+assert N_ACTIONS == 2880, N_ACTIONS
 
 
 def decode_action(idx):
-    """Map a discrete action index in [0,1296) to concrete sqlmap params."""
+    """Map a discrete action index in [0,2880) to concrete sqlmap params."""
     i = int(idx)
     i, ra = divmod(i, len(RANDOM_AGENT))
     i, op = divmod(i, len(OPERATORS))
@@ -404,7 +406,15 @@ def make_env(waf=WAF, ep_len=EP_LEN, total_timesteps=TOTAL_TIMESTEPS):
 
         def step(self, action_idx):
             action = decode_action(action_idx)
-            tele = call_kali(action, waf=self.waf)
+            try:
+                tele = call_kali(action, waf=self.waf)
+            except Exception as e:  # noqa: BLE001 - RESILIENCE (crash fix):
+                # a transient relay/tunnel blip (e.g. HTTP 502) must NOT propagate and kill
+                # this SubprocVecEnv worker -- that aborts the ENTIRE run (seen: EOFError at
+                # step ~1792/20000). Return a neutral zero-reward step and keep going.
+                tele = {"found": False, "block_ratio": 0.0, "requests": 0,
+                        "techniques": [], "payloads": [], "dbms": None,
+                        "timed_out": False, "error": f"relay: {e}"}
             reward, parts = self.reward_fn.compute(tele, fa2rnn=self.fa2rnn)
             self._step += 1
             terminated = bool(tele.get("found"))   # episode ends on a successful evasion
